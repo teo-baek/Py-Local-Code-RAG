@@ -9,9 +9,13 @@ pycache/
 *.pyc
 .ipynb_checkpoints
 
+pycache/
+*.pyc
+
 # Virtual environments
 .venv
 .env
+venv/
 
 chroma_db/
 

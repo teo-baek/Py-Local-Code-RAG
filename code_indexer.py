@@ -1,6 +1,7 @@
 import os
 import sys
 import argparse
+import shutil
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -36,14 +37,18 @@ CODE_EXTENSIONS = (
     ".yaml",
     ".yml",
     ".txt",
+    ".sql",
+    ".xml",
+    ".properties",
+    ".toml",
 )
 
 
-def load_documents(root_dir: str) -> list[Document]:
+def load_documents(root_dir: str):
     """
-    주어진 폴터에서 지정된 확장자의 모든 코드를 재귀적으로 로드.
+    프로젝트 폴더를 재귀적으로 탐색하여 코드 파일을 로드
     """
-    print(f"[{root_dir} 폴더에서 코드 파일을 로드합니다.]")
+    print(f"[{root_dir} 폴더 분석을 시작합니다.]")
 
     documents = []
     # os.walk를 사용하여 폴더를 재귀적으로 탐색.
@@ -70,45 +75,85 @@ def load_documents(root_dir: str) -> list[Document]:
                         documents.append(doc)
                 except Exception as e:
                     # 파일 인코딩 오류 등을 대비한 예외 처리
-                    print(f"경고: {filepath} 파일을 로드할 수 있습니다. 오류: {e}")
+                    print(f"로드 실패: {filepath} - {e}")
 
-    print(f"총 {len(documents)}개의 파일이 로드되었습니다.")
+    print(f"총 {len(documents)}개의 코드 파일을 메모리에 로드했습니다.")
     return documents
 
 
-def index_codebase(documents: list[Document]):
+def index_codebase(documents: list[Document], project_name: str):
     """
-    로드된 문서를 분할하고 임베딩하여 로컬 벡터 DB에 저장.
+    로드된 코드를 벡터화하여 프로젝트 전용 DB에 저장합니다.
     """
     if not documents:
-        print("경고: 로드된 문서가 없어 색인을 건너뜁니다.")
+        print("로드된 문서가 없습니다. 경로를 확인하세요.")
         return
 
-    print("코드 분할을 시작합니다.")
+    print("코드 문맥 분할을 시작합니다.")
 
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000, chunk_overlap=200, separators=["\n\n", "\n", " ", ""]
     )
 
     texts = text_splitter.split_documents(documents)
-    print(f"분할된 코드 청크 수: {len(texts)}")
+    print(f"생성된 코드 청크: {len(texts)}개")
 
-    print("임베딩 모델을 로드합니다.")
+    print("벡터 임베딩 생성 중.")
 
     embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
 
-    print(f"벡터 DB에 코드를 색인합니다. (경로: {CHROMA_DB_PATH})")
-    db = Chroma.from_documents(texts, embeddings, persist_directory=CHROMA_DB_PATH)
+    # 프로젝트별 격리된 DB 경로 생성
+    persist_dir = os.path.join(CHROMA_DB_PATH, project_name)
+    print(f"데이터베이스 저장 경로: {persist_dir}")
+
+    # 기존 데이터가 있으면 삭제하고 새로 생성 (Clean Build)
+    if os.path.exists(persist_dir):
+        shutil.rmtree(persist_dir)
+
+    db = Chroma.from_documents(texts, embeddings, persist_directory=persist_dir)
     db.persist()
-    print("코드베이스 색인 완료. 이제 code_qa_tool.py를 실행하여 질문을 시작하세요.")
+    print(f"프로젝트 '{project_name}' 학습 완료. 이제 app.py를 사용할 수 있습니다.")
+
+    return len(texts)
+
+
+def embed_project(root_dir, project_name):
+    """
+    Streamlit 등 외부 앱에서 호출하기 위한 통합 함수.
+    성공 여부와 메시지를 반환합니다.
+    """
+    try:
+        if not os.path.isdir(root_dir):
+            return False, f"❌ 경로가 유효하지 않습니다: {root_dir}"
+
+        docs = load_documents(root_dir)
+        if not docs:
+            return (
+                False,
+                "⚠️ 로드된 파일이 없습니다. 경로 내에 소스 코드가 있는지 확인하세요.",
+            )
+
+        chunk_count = index_codebase(docs, project_name)
+        return (
+            True,
+            f"✅ 학습 완료! 총 {len(docs)}개 파일, {chunk_count}개 청크가 저장되었습니다.",
+        )
+    except Exception as e:
+        return False, f"❌ 오류 발생: {str(e)}"
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="로컬 코드베이스를 벡터 데이터베이스로 색인하는 도구"
+        description="프로젝트 코드를 AI에게 학습시키는 도구"
     )
     parser.add_argument(
         "project_path", type=str, help="분석할 프로젝트 폴더의 절대 또는 상대 경로"
+    )
+    parser.add_argument(
+        "--name",
+        type=str,
+        default="default",
+        help="프로젝트 식별 이름 (기본값: default)",
     )
     args = parser.parse_args()
 
@@ -121,9 +166,14 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    # 1. 문서 로드
-    loaded_documents = load_documents(PROJECT_ROOT)
+    docs = load_documents(PROJECT_ROOT)
 
-    # 2. 색인 실행
-    if loaded_documents:
-        index_codebase(loaded_documents)
+    if docs:
+        prj_name = (
+            args.name if args.name != "default" else os.path.basename(PROJECT_ROOT)
+        )
+        index_codebase(docs, prj_name)
+
+        print(f"🚀 '{prj_name}' 프로젝트 학습을 시작합니다...")
+        success, msg = embed_project(PROJECT_ROOT, prj_name)
+        print(msg)
